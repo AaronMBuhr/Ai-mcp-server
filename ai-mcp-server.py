@@ -386,6 +386,73 @@ def resolve_alias_reference(
     return {"path": candidate, "text": text}
 
 
+def resolve_alias_write_path(
+    ref: str,
+    *,
+    aliases: Dict[str, Path],
+) -> Dict[str, Any]:
+    """Resolve an 'alias/relative/path' reference to a writable on-disk path.
+
+    The read-side twin (resolve_alias_reference) requires the file to exist;
+    this one does not, since it names a file about to be created. The same
+    containment rules apply: known alias, relative path, no '..' segments, and
+    the resolved path must stay inside the alias's directory.
+
+    Resolution happens before the provider is contacted, so a bad path costs no
+    provider call — the caller finds out for free rather than after paying for a
+    response that cannot be delivered.
+
+    Returns {"path": Path} on success, else {"error": <detail>}.
+    """
+    if not aliases:
+        return {"error": "no directory_aliases are configured on this server; "
+                         "server-side file transport is disabled."}
+    if not isinstance(ref, str) or not ref.strip():
+        return {"error": f"response_file is not a usable string: {ref!r}."}
+    normalized = ref.strip().replace("\\", "/")
+    if "/" not in normalized:
+        return {"error": f"response_file {ref!r} must be of the form "
+                         "'alias/relative/path'."}
+    alias_name, rel = normalized.split("/", 1)
+    alias_name = alias_name.strip()
+    rel = rel.strip("/")
+    if not alias_name or not rel:
+        return {"error": f"response_file {ref!r} must name a directory alias "
+                         "and a relative path."}
+    if alias_name not in aliases:
+        return {"error": f"unknown directory alias {alias_name!r}; configured "
+                         f"aliases: {sorted(aliases)}."}
+    if ".." in rel.split("/"):
+        return {"error": f"response_file {ref!r} may not contain '..' segments."}
+
+    root = aliases[alias_name]
+    candidate = (root / rel)
+    # Resolve the parent rather than the file: the file may not exist yet, and
+    # a non-existent tail must not defeat containment checking.
+    parent = candidate.parent.resolve()
+    root_cmp = os.path.normcase(str(root))
+    par_cmp = os.path.normcase(str(parent))
+    if not (par_cmp == root_cmp or par_cmp.startswith(root_cmp + os.sep)):
+        return {"error": f"response_file {ref!r} resolves outside the directory "
+                         f"for alias {alias_name!r}."}
+    if candidate.exists() and not candidate.is_file():
+        return {"error": f"response_file {ref!r} exists and is not a regular file."}
+    return {"path": parent / candidate.name}
+
+
+def truncate_utf8(text: str, max_bytes: int) -> Tuple[str, bool]:
+    """Cut text to at most max_bytes of UTF-8, never splitting a character.
+
+    Returns (text, was_truncated). A byte limit can land mid-character, so the
+    tail is decoded with errors='ignore' to drop a partial one; the result is
+    always valid UTF-8 and always within the limit.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
 def resolve_replacement_files(
     replacement_files: Dict[str, str],
     *,
@@ -553,6 +620,8 @@ def execute_prepared_query(
     request_id: str,
     response_contract: Optional[str] = None,
     debug_dir: Optional[str] = None,
+    response_path: Optional[Path] = None,
+    max_response_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Contact the provider for an already-validated request and build the
     success/error envelope (P4, P6, P8)."""
@@ -580,6 +649,47 @@ def execute_prepared_query(
             extra={"elapsed_ms": elapsed_ms, "model_resolved": prepared["model_resolved"]},
         )
 
+    # Write the response to disk before building the envelope. A requested file
+    # ALWAYS receives the complete response -- never conditioned on length or on
+    # max_response_bytes -- so a caller may always request the file and ignore it
+    # whenever the inline copy suffices. The file gets the response verbatim and
+    # nothing else (no wrapper, no metadata), so hashing it reproduces
+    # response_sha256 exactly. That is what makes the file trustworthy as the
+    # response rather than a report about it.
+    written_bytes: Optional[int] = None
+    if response_path is not None:
+        try:
+            response_path.parent.mkdir(parents=True, exist_ok=True)
+            data = response_text.encode("utf-8")
+            response_path.write_bytes(data)
+            written_bytes = len(data)
+        except OSError as e:
+            # The path was validated before the provider call, so this is rare
+            # (disk full, permissions changed mid-flight). The provider was
+            # already paid for, so return the full text inline rather than
+            # discarding it -- an error the caller can still salvage.
+            return error_result(
+                "response_write_failed",
+                f"Could not write response_file: {e}. The complete response is "
+                "returned inline as response_text.",
+                request_id=request_id, provider_called=True, retryable=False,
+                error_type=type(e).__name__,
+                extra={
+                    "response_text": response_text,
+                    "response_sha256": sha256_text(response_text),
+                    "response_characters": len(response_text),
+                    "elapsed_ms": elapsed_ms,
+                    "model_resolved": result.model or prepared["model_resolved"],
+                },
+            )
+
+    # max_response_bytes caps only the inline copy; the file always holds the
+    # complete response. 0 means "file only".
+    inline_text = response_text
+    truncated = False
+    if max_response_bytes is not None:
+        inline_text, truncated = truncate_utf8(response_text, max_response_bytes)
+
     response: Dict[str, Any] = {
         "status": "success",
         "request_id": request_id,
@@ -590,7 +700,7 @@ def execute_prepared_query(
         "provider": provider,
         "intelligence": intelligence,
         "model": result.model,
-        "response_text": response_text,
+        "response_text": inline_text,
         "warnings": list(prepared["warnings"]),
         "usage": result.usage,
         "elapsed_ms": elapsed_ms,
@@ -607,9 +717,19 @@ def execute_prepared_query(
         "model_resolved": result.model or prepared["model_resolved"],
         "rendered_system_prompt_sha256": prepared["rendered_system_prompt_sha256"],
         "rendered_user_prompt_sha256": prepared["rendered_user_prompt_sha256"],
+        # Always describes the COMPLETE response, never the inline copy. Hash the
+        # response_file and compare against this to prove the file is intact.
         "response_sha256": sha256_text(response_text),
+        "response_characters": len(response_text),
+        "response_bytes": len(response_text.encode("utf-8")),
+        # True when max_response_bytes cut the inline copy. The caller must read
+        # response_file for the rest; response_text alone is then incomplete.
+        "response_truncated": truncated,
         "replacement_metadata": prepared["replacement_metadata"],
     }
+    if response_path is not None:
+        response["response_path"] = str(response_path)
+        response["response_file_bytes"] = written_bytes
 
     # Optional structured response contract (P6).
     if response_contract:
@@ -921,6 +1041,39 @@ class MCPServer:
             response_contract: Annotated[Optional[str], Field(
                 description="Optional structured-response contract to enforce, e.g. 'docx_document_program_v1'",
             )] = None,
+            response_file: Annotated[Optional[str], Field(
+                description=(
+                    "Optional 'alias/relative/path' reference. When given, the "
+                    "server ALWAYS writes the complete response to that file, "
+                    "verbatim -- raw text only, no wrapper and no metadata -- so "
+                    "hashing the file reproduces response_sha256. This never "
+                    "depends on max_response_bytes or on the response's length. "
+                    "Parent directories are created. The path is validated before "
+                    "the provider is contacted."
+                ),
+            )] = None,
+            max_response_bytes: Annotated[Optional[int], Field(
+                description=(
+                    "Optional cap on the INLINE response_text only. It never "
+                    "affects response_file, which always receives the complete "
+                    "response. 0 returns no inline text at all. A small value "
+                    "(e.g. 1024) returns the response inline when it fits and a "
+                    "truncated prefix when it does not. Omit for the full "
+                    "response inline. response_truncated reports whether the cap "
+                    "was hit; response_bytes and response_sha256 always describe "
+                    "the complete response, so a truncated inline copy will not "
+                    "match that hash.\n"
+                    "Usable with or without response_file. Without one, anything "
+                    "past the cap is discarded -- but that can still be the right "
+                    "call: some MCP clients REJECT an oversized tool result "
+                    "outright rather than truncating it, and a rejected result "
+                    "loses everything, including the hashes and model_resolved "
+                    "needed to verify the call happened. Capping under such a "
+                    "client's limit is what makes the result deliverable at all. "
+                    "Pair it with response_file to keep the full text as well."
+                ),
+                ge=0,
+            )] = None,
         ) -> Dict[str, Any]:
             """Render prompt templates, query the configured LLM, return normalized response."""
             request_id = str(uuid.uuid4())
@@ -974,6 +1127,30 @@ class MCPServer:
             attached_files_block = attach_outcome["block"]
             attachment_metadata = attach_outcome["metadata"]
 
+            # Response destination, resolved before any provider work: a bad
+            # alias or path must cost nothing.
+            #
+            # max_response_bytes is honored with or without response_file.
+            # Capping without a file discards the remainder, but never silently:
+            # response_truncated reports it, and response_bytes/response_sha256
+            # still describe the complete response. It is also sometimes the only
+            # way to get anything back -- clients differ on overflow, and one that
+            # REJECTS an oversized result rather than truncating it loses the
+            # whole envelope, hashes included. Capping is what keeps the result
+            # deliverable; the caller knows its own client's limit.
+            response_path: Optional[Path] = None
+            if response_file:
+                write_outcome = resolve_alias_write_path(
+                    response_file, aliases=self._directory_aliases,
+                )
+                if "error" in write_outcome:
+                    return error_result(
+                        "file_write_failed", write_outcome["error"],
+                        request_id=request_id, provider_called=False,
+                        error_type="ValueError",
+                    )
+                response_path = write_outcome["path"]
+
             call_start = time.time()
             prepared: Optional[Dict[str, Any]] = None
             try:
@@ -1024,6 +1201,8 @@ class MCPServer:
                         request_id=request_id,
                         response_contract=response_contract,
                         debug_dir=self._settings.debug_dir,
+                        response_path=response_path,
+                        max_response_bytes=max_response_bytes,
                     )
             except Exception as e:
                 logger.error(f"Unexpected error in query_ai: {traceback.format_exc()}")
@@ -1067,7 +1246,13 @@ class MCPServer:
                     "List of request objects: {id, provider, intelligence, "
                     "system_prompt_template, user_prompt_template, "
                     "additional_user_prompt?, replacement_values?, "
-                    "replacement_files?, response_contract?}"
+                    "replacement_files?, response_contract?, response_file?, "
+                    "max_response_bytes?}. response_file is an "
+                    "'alias/relative/path'; when given, the server always writes "
+                    "that request's complete response to it verbatim. "
+                    "max_response_bytes caps only that request's inline "
+                    "response_text (0 = no inline text), never affects the file, "
+                    "and may be used with or without response_file."
                 ),
             )],
             shared_replacement_values: Dict[str, Any] = {},
@@ -1168,6 +1353,26 @@ class MCPServer:
                     validation_failures.append(failure)
                     continue
                 merged_values = req_merge["merged"]
+
+                # Per-request response destination, validated here in phase 1 so
+                # one bad path fails the whole batch before any provider is paid.
+                # max_response_bytes needs no file: see the note in query_ai.
+                req_response_file = req.get("response_file")
+                req_max_bytes = req.get("max_response_bytes")
+                req_response_path: Optional[Path] = None
+                if req_response_file:
+                    write_outcome = resolve_alias_write_path(
+                        str(req_response_file), aliases=self._directory_aliases,
+                    )
+                    if "error" in write_outcome:
+                        validation_failures.append({
+                            "id": req_id,
+                            "failure_type": "file_write_failed",
+                            "detail": write_outcome["error"],
+                        })
+                        continue
+                    req_response_path = write_outcome["path"]
+
                 entry = {
                     "id": req_id,
                     "request_id": request_uuid,
@@ -1176,6 +1381,8 @@ class MCPServer:
                     "system_prompt_template": str(req.get("system_prompt_template") or ""),
                     "user_prompt_template": str(req.get("user_prompt_template") or ""),
                     "response_contract": req.get("response_contract"),
+                    "response_path": req_response_path,
+                    "max_response_bytes": req_max_bytes,
                 }
                 outcome = prepare_query(
                     prompt_dir=self._prompt_dir,
@@ -1237,6 +1444,8 @@ class MCPServer:
                     request_id=entry["request_id"],
                     response_contract=entry["response_contract"],
                     debug_dir=self._settings.debug_dir,
+                    response_path=entry["response_path"],
+                    max_response_bytes=entry["max_response_bytes"],
                 )
 
             max_workers = max(1, min(len(prepared_requests), self._settings.batch_max_workers))
