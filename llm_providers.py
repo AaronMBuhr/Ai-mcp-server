@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("ai-mcp-server")
@@ -19,11 +19,10 @@ logger = logging.getLogger("ai-mcp-server")
 class LLMOptions:
     """Per-call options controlling model selection and behavior."""
     model: str
-    temperature: Optional[float] = None
-    max_output_tokens: Optional[int] = None
     timeout_seconds: Optional[int] = None
     max_retries: int = 3
     retry_base_seconds: int = 30
+    parameters: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,7 +84,7 @@ class LLMProvider(ABC):
         Args:
             system_prompt: The system instructions.
             user_prompt: The user message.
-            options: Per-call options (model, temperature, tokens, retries).
+            options: Per-call options (model, retry controls, provider parameters).
 
         Returns:
             LLMResult with the response text and metadata.
@@ -116,13 +115,16 @@ class ChatGPTProvider(LLMProvider):
         for attempt in range(options.max_retries):
             try:
                 result_text = ""
-                stream = self._client.chat.completions.create(
-                    model=options.model,
-                    messages=messages,
-                    temperature=options.temperature,
-                    max_tokens=options.max_output_tokens,
-                    stream=True,
+                request_kwargs: Dict[str, Any] = {
+                    "model": options.model,
+                    "messages": messages,
+                    "stream": True,
+                }
+                request_kwargs.update(
+                    {key: value for key, value in options.parameters.items() if value is not None}
                 )
+
+                stream = self._client.chat.completions.create(**request_kwargs)
                 for chunk in stream:
                     if chunk.choices[0].delta.content is not None:
                         result_text += chunk.choices[0].delta.content
@@ -189,18 +191,18 @@ class ClaudeProvider(LLMProvider):
         return "Claude"
 
     def generate(self, system_prompt: str, user_prompt: str, options: LLMOptions) -> LLMResult:
-        max_tokens = options.max_output_tokens or 8192
-
+        request_kwargs: Dict[str, Any] = {
+            "model": options.model,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        request_kwargs.update(
+            {key: value for key, value in options.parameters.items() if value is not None}
+        )
         for attempt in range(options.max_retries):
             try:
                 result_text = ""
-                with self._client.messages.stream(
-                    model=options.model,
-                    max_tokens=max_tokens,
-                    temperature=options.temperature,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_prompt}],
-                ) as stream:
+                with self._client.messages.stream(**request_kwargs) as stream:
                     for text in stream.text_stream:
                         result_text += text
 
@@ -249,10 +251,9 @@ class GeminiProvider(LLMProvider):
 
     def generate(self, system_prompt: str, user_prompt: str, options: LLMOptions) -> LLMResult:
         config: Dict[str, Any] = {"system_instruction": system_prompt}
-        if options.temperature is not None:
-            config["temperature"] = options.temperature
-        if options.max_output_tokens is not None:
-            config["max_output_tokens"] = options.max_output_tokens
+        config.update(
+            {key: value for key, value in options.parameters.items() if value is not None}
+        )
 
         for attempt in range(options.max_retries):
             try:

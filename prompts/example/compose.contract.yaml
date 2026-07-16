@@ -1,0 +1,8 @@
+# Placeholder-free example pair: the task arrives via additional_user_prompt and
+# the material via `files` attachments, so there are no template slots to fill.
+# No replacement_values are expected; passing any is a caller mistake.
+name: example-compose
+system_template: example/compose-system
+user_template: example/compose-user
+required_replacements: {}
+allow_extra_keys: false

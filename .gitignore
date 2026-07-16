@@ -1,0 +1,22 @@
+# Live config — machine-specific paths and directory_aliases pointing at real
+# document directories. Copy ai-mcp-server.yaml.example to ai-mcp-server.yaml.
+ai-mcp-server.yaml
+
+# Debug prompt dumps (contain fully rendered prompts, i.e. real document text)
+.debug/
+
+# Local env and secrets
+.env
+
+# Smoke test artifacts
+stderr.log
+stdout.log
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.backups/
+.audit/

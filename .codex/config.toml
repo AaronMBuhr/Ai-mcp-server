@@ -1,0 +1,14 @@
+[mcp_servers.ai-mcp-server]
+command = "conda"
+args = [
+    "run",
+    "-n",
+    "mypython312",
+    "--no-capture-output",
+    "python",
+    "-X",
+    "utf8",
+    'E:\Source\Mine\AIMcpServer\ai-mcp-server.py',
+    "--transport",
+    "stdio",
+]

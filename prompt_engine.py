@@ -115,6 +115,11 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _REPLACEMENT_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def template_placeholders(template_text: str) -> set:
+    """Return the set of {placeholder} names used by a template."""
+    return set(_PLACEHOLDER_RE.findall(template_text))
+
+
 def _render_value(value: Any) -> str:
     """Convert a replacement value to its string representation."""
     if isinstance(value, str):
@@ -122,7 +127,11 @@ def _render_value(value: Any) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False)
 
 
-def render_template(template_text: str, replacement_values: Dict[str, Any]) -> Tuple[str, List[str]]:
+def render_template(
+    template_text: str,
+    replacement_values: Dict[str, Any],
+    template_label: str = "",
+) -> Tuple[str, List[str]]:
     """Render a prompt template by replacing {placeholder} tokens.
 
     Uses explicit string replacement, NOT str.format(), so that literal braces
@@ -131,6 +140,13 @@ def render_template(template_text: str, replacement_values: Dict[str, Any]) -> T
     Args:
         template_text: The raw template text with {placeholder} tokens.
         replacement_values: Dict mapping placeholder names to values.
+        template_label: How to name this template in warnings, e.g.
+            "the system template 'resume/generate-resume-system'". Callers that
+            render both halves of a prompt pair against one shared
+            replacement_values dict should always pass this: every key destined
+            for the user template is "unused" by a placeholder-free system
+            template, and an unlabelled warning makes that look like a
+            transport failure.
 
     Returns:
         Tuple of (rendered_text, warnings).
@@ -151,9 +167,15 @@ def render_template(template_text: str, replacement_values: Dict[str, Any]) -> T
     if missing:
         raise ValueError(f"Missing replacement values: {', '.join(missing)}")
 
+    label = template_label or "this template"
+    # A template with no placeholders at all reports every supplied key as
+    # unused. That is structural, not a mistake, so say so inline.
+    note = " (it has no placeholders)" if not placeholders else ""
     unused = sorted(set(replacement_values.keys()) - placeholders)
     for key in unused:
-        warnings.append(f"Replacement value '{key}' was supplied but not used by this template.")
+        warnings.append(
+            f"Replacement value '{key}' was supplied but is not used by {label}{note}."
+        )
 
     rendered = template_text
     for key in placeholders:
@@ -243,6 +265,23 @@ def save_debug_prompt(
     return file_path
 
 
+class RoutingError(ValueError):
+    """Base class for provider/intelligence routing failures."""
+    failure_type = "provider_error"
+
+
+class UnknownProviderError(RoutingError):
+    failure_type = "unknown_provider"
+
+
+class UnknownIntelligenceError(RoutingError):
+    failure_type = "unknown_intelligence"
+
+
+class ModelRouteMissingError(RoutingError):
+    failure_type = "model_route_missing"
+
+
 class LLMRouter:
     """Routes provider + intelligence requests to the correct LLM provider.
 
@@ -256,6 +295,60 @@ class LLMRouter:
     def __init__(self, config: dict):
         self.config = config
         self._providers: Dict[str, LLMProvider] = {}
+
+    def resolve_route(self, provider_name: str, intelligence: str) -> Dict[str, str]:
+        """Resolve provider + intelligence to concrete routing facts without
+        contacting any provider.
+
+        Returns:
+            {"provider_resolved": <config 'type' or provider name>,
+             "model_resolved": <configured model id>}
+
+        Raises:
+            UnknownProviderError / UnknownIntelligenceError / ModelRouteMissingError
+            so the caller can fail closed with a stable failure_type.
+        """
+        providers = self.config.get("providers") or {}
+        if provider_name not in providers:
+            valid = ", ".join(sorted(providers.keys()))
+            raise UnknownProviderError(
+                f"Unknown provider '{provider_name}'. Valid providers: {valid}"
+            )
+
+        provider_config = providers[provider_name]
+        models = provider_config.get("models") or {}
+        if intelligence not in models:
+            valid = ", ".join(sorted(models.keys()))
+            raise UnknownIntelligenceError(
+                f"Unknown intelligence '{intelligence}' for provider '{provider_name}'. "
+                f"Valid values: {valid}"
+            )
+
+        model_config = models[intelligence] or {}
+        model = model_config.get("model")
+        if not model:
+            raise ModelRouteMissingError(
+                f"No model configured for provider '{provider_name}' "
+                f"tier '{intelligence}'"
+            )
+
+        return {
+            "provider_resolved": str(provider_config.get("type") or provider_name),
+            "model_resolved": str(model),
+        }
+
+    def route_map(self) -> Dict[str, Dict[str, str]]:
+        """Safe route summary for health_check: provider -> tier -> model id."""
+        routes: Dict[str, Dict[str, str]] = {}
+        for provider_name, provider_conf in (self.config.get("providers") or {}).items():
+            if not isinstance(provider_conf, dict):
+                continue
+            tiers = {}
+            for tier_name, tier_conf in (provider_conf.get("models") or {}).items():
+                if isinstance(tier_conf, dict) and tier_conf.get("model"):
+                    tiers[tier_name] = str(tier_conf["model"])
+            routes[provider_name] = tiers
+        return routes
 
     def query(
         self, provider_name: str, intelligence: str, system_prompt: str, user_prompt: str
@@ -272,21 +365,13 @@ class LLMRouter:
             LLMResult with response text and metadata.
 
         Raises:
-            ValueError: If provider or intelligence is not found in config.
+            RoutingError subclass: If provider or intelligence is not found in config.
         """
-        providers = self.config.get("providers") or {}
-        if provider_name not in providers:
-            valid = ", ".join(sorted(providers.keys()))
-            raise ValueError(f"Unknown provider '{provider_name}'. Valid providers: {valid}")
+        self.resolve_route(provider_name, intelligence)
 
+        providers = self.config.get("providers") or {}
         provider_config = providers[provider_name]
         models = provider_config.get("models") or {}
-        if intelligence not in models:
-            valid = ", ".join(sorted(models.keys()))
-            raise ValueError(
-                f"Unknown intelligence '{intelligence}' for provider '{provider_name}'. "
-                f"Valid values: {valid}"
-            )
 
         defaults = self.config.get("defaults") or {}
         model_config = models[intelligence]
@@ -296,14 +381,24 @@ class LLMRouter:
             **provider_config,
             **model_config,
         }
+        option_control_keys = {
+            "model",
+            "timeout_seconds",
+            "max_retries",
+            "retry_base_seconds",
+        }
+        model_parameters = {
+            key: value
+            for key, value in model_config.items()
+            if key not in option_control_keys
+        }
 
         options = LLMOptions(
             model=merged["model"],
-            temperature=merged.get("temperature"),
-            max_output_tokens=merged.get("max_output_tokens") or merged.get("max_tokens"),
             timeout_seconds=merged.get("timeout_seconds"),
             max_retries=int(merged.get("max_retries", 3)),
             retry_base_seconds=int(merged.get("retry_base_seconds", 30)),
+            parameters=model_parameters,
         )
 
         provider = self._get_provider(provider_name, provider_config)

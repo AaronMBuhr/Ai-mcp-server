@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "ai-mcp-server": {
+      "type": "stdio",
+      "command": "conda",
+      "args": [
+        "run",
+        "-n",
+        "mypython312",
+        "--no-capture-output",
+        "python",
+        "-X",
+        "utf8",
+        "E:\\Source\\Mine\\AIMcpServer\\ai-mcp-server.py",
+        "--transport",
+        "stdio"
+      ],
+      "env": {}
+    }
+  }
+}

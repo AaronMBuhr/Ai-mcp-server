@@ -1,0 +1,21 @@
+# Example prompt contract. This pair ships as a working reference for the
+# contract mechanism and is what the test suite renders against; it carries no
+# real content. Point --prompt-dir at your own directory for real work.
+name: example-review
+system_template: example/review-system
+user_template: example/review-user
+required_replacements:
+  product:
+    kind: scalar
+    allow_empty: true
+  audience:
+    kind: scalar
+    allow_empty: true
+  specification:
+    kind: document
+    allow_empty: false
+    min_characters: 300
+  reference_doc:
+    kind: document
+    allow_empty: false
+    min_characters: 1000
