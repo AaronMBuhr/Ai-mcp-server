@@ -23,8 +23,10 @@ one JSON object of the shape::
 ``python``); it is not part of the program's identity.
 
 A single markdown code fence wrapping the object is tolerated (models add
-one persistently despite instructions); any other prose or trailing content
-outside the object is rejected.
+one persistently despite instructions). A short run of structurally
+meaningless close-punctuation after the object is likewise tolerated and
+reported as a warning; any other prose or trailing content outside the
+object is rejected.
 """
 
 import hashlib
@@ -39,6 +41,15 @@ _REQUIRED_FIELDS = ("renderer_type", "source_filename", "source_code")
 
 _FENCE_OPEN = re.compile(r"^```[A-Za-z0-9_-]*\s*\n")
 _FENCE_CLOSE = re.compile(r"\n```\s*$")
+
+# Trailing junk that cannot carry meaning: a few stray quotes/brackets the model
+# emitted after already closing the envelope. Deliberately narrow. Anything that
+# could be a second value, more source, or prose -- anything containing a letter,
+# digit, or opening brace -- falls outside this and is still rejected, because
+# substantive trailing content can mean the program was split or truncated and
+# accepting it would yield a silently corrupt .docx. See _MAX_TRAILING_JUNK.
+_TOLERABLE_TRAILING = re.compile(r"^[\s\"'}\]]+$")
+_MAX_TRAILING_JUNK = 8
 
 
 class ResponseContractError(ValueError):
@@ -66,6 +77,7 @@ def parse_docx_document_program_v1(raw_response: str, strict: bool = True) -> Di
           "source_filename": ...,
           "source_code": ...,
           "source_code_sha256": ...,
+          "envelope_warnings": [...],
         }
 
     Raises ResponseContractError with a precise reason on any violation.
@@ -91,11 +103,22 @@ def parse_docx_document_program_v1(raw_response: str, strict: bool = True) -> Di
             f"Docx document program response is not valid JSON: {exc}"
         ) from exc
 
+    envelope_warnings = []
     trailing = candidate[end:].strip()
     if trailing:
-        raise ResponseContractError(
-            "Docx document program response contained trailing content after the JSON object."
-        )
+        if len(trailing) <= _MAX_TRAILING_JUNK and _TOLERABLE_TRAILING.match(trailing):
+            # raw_decode already proved the envelope complete and well-formed, so
+            # these characters follow a finished object and cannot belong to it.
+            # A truncated response fails raw_decode above instead of landing here.
+            envelope_warnings.append(
+                f"Discarded {len(trailing)} stray trailing character(s) "
+                f"({trailing!r}) after the JSON object. The envelope parsed "
+                f"cleanly without them and source_code is unmodified."
+            )
+        else:
+            raise ResponseContractError(
+                "Docx document program response contained trailing content after the JSON object."
+            )
 
     if not isinstance(parsed, dict):
         raise ResponseContractError("Docx document program response JSON is not an object.")
@@ -128,4 +151,7 @@ def parse_docx_document_program_v1(raw_response: str, strict: bool = True) -> Di
         "source_filename": parsed["source_filename"],
         "source_code": source_code,
         "source_code_sha256": hashlib.sha256(source_code.encode("utf-8")).hexdigest(),
+        # Empty on a clean parse. The caller lifts this out of the payload so a
+        # repaired envelope is visible in the run's warnings rather than silent.
+        "envelope_warnings": envelope_warnings,
     }

@@ -755,6 +755,13 @@ def execute_prepared_query(
                     "model_resolved": response["model_resolved"],
                 },
             )
+        # Lift envelope repairs out of the payload: `parsed` stays exactly the
+        # shape the workflow contract documents, and a repair shows up in the
+        # run's warnings instead of passing silently.
+        envelope_warnings = parsed.pop("envelope_warnings", [])
+        if envelope_warnings:
+            response["warnings"] = list(response["warnings"]) + envelope_warnings
+            response["envelope_repaired"] = True
         response["response_contract"] = response_contract
         response["raw_response_sha256"] = sha256_text(response_text)
         response["parsed"] = parsed
