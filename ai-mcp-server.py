@@ -846,8 +846,13 @@ def audit_record_for(
         }
     response_text = result.get("response_text")
     if isinstance(response_text, str):
-        record["response_characters"] = len(response_text)
+        # response_text is only the inline copy, which max_response_bytes may cut
+        # (to "" when file-only). Prefer the result's full-response count so it
+        # describes the same text response_sha256 does.
+        record["response_characters"] = result.get("response_characters", len(response_text))
         record["response_sha256"] = result.get("response_sha256") or sha256_text(response_text)
+        if result.get("response_truncated"):
+            record["response_truncated"] = True
     return record
 
 

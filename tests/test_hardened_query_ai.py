@@ -158,7 +158,7 @@ class TestHardenedQueryAi:
         )
         r = self._call(provider="chatgpt", intelligence="high")
         assert r["status"] == "success"
-        assert r["model_resolved"] == "gpt-5.5"
+        assert r["model_resolved"] == "test-openai-high"
         assert r["provider_resolved"] == "openai"
 
     def test_claude_low_resolves_expected_model(self):
@@ -167,7 +167,7 @@ class TestHardenedQueryAi:
         )
         r = self._call(provider="claude", intelligence="low")
         assert r["status"] == "success"
-        assert r["model_resolved"] == "claude-haiku-4-5"
+        assert r["model_resolved"] == "test-claude-low"
         assert r["provider_resolved"] == "anthropic"
 
     def test_missing_route_fails_closed(self):
@@ -209,7 +209,7 @@ class TestHardenedQueryAi:
     def test_health_check_exposes_routes(self):
         r = self.tools["health_check"]()
         assert r["status"] == "ready"
-        assert r["routes"]["chatgpt"]["high"] == "gpt-5.5"
-        assert r["routes"]["claude"]["low"] == "claude-haiku-4-5"
+        assert r["routes"]["chatgpt"]["high"] == "test-openai-high"
+        assert r["routes"]["claude"]["low"] == "test-claude-low"
         assert "example-review" in r["prompt_contracts"]
         assert "docx_document_program_v1" in r["response_contracts"]

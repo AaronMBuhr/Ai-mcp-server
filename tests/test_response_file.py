@@ -27,6 +27,7 @@ resolve_alias_write_path = G["resolve_alias_write_path"]
 truncate_utf8 = G["truncate_utf8"]
 ServerSettings = G["ServerSettings"]
 MCPServer = G["MCPServer"]
+audit_record_for = G["audit_record_for"]
 
 LONG_RESPONSE = "The ingestion path must be idempotent. " * 200  # ~7.6k chars
 
@@ -292,3 +293,32 @@ class TestQueryAiBatchResponseFile:
         assert res["response_truncated"] is True
         assert len(res["response_text"].encode("utf-8")) <= 512
         assert "response_path" not in res
+
+
+class TestAuditRecordDescribesFullResponse:
+    """The audit record's size must describe the same text its hash does: the
+    complete response, not the inline copy max_response_bytes may have cut."""
+
+    def _record(self, result):
+        return audit_record_for(
+            request_id="r1", batch_id=None, provider="chatgpt", intelligence="low",
+            system_prompt_template="s", user_prompt_template="u",
+            prepared=None, result=result, duration_ms=1,
+        )
+
+    def test_file_only_response_reports_full_length(self):
+        full = hashlib.sha256(LONG_RESPONSE.encode("utf-8")).hexdigest()
+        rec = self._record({
+            "status": "success", "response_text": "",
+            "response_characters": len(LONG_RESPONSE),
+            "response_sha256": full, "response_truncated": True,
+        })
+        assert rec["response_characters"] == len(LONG_RESPONSE)
+        assert rec["response_sha256"] == full
+        assert rec["response_truncated"] is True
+
+    def test_untruncated_response_has_no_truncation_flag(self):
+        rec = self._record({"status": "success", "response_text": "OK",
+                            "response_characters": 2, "response_truncated": False})
+        assert rec["response_characters"] == 2
+        assert "response_truncated" not in rec

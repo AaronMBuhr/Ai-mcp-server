@@ -36,8 +36,10 @@ providers:
         assert "chatgpt" in config["providers"]
         assert config["providers"]["chatgpt"]["models"]["low"]["model"] == "gpt-5.4-mini"
 
-    def test_loads_real_config_file(self):
-        config = load_yaml_config(Path("ai-mcp-server.yaml"))
+    def test_loads_example_config_file(self):
+        # The committed example, not the live ai-mcp-server.yaml: the live file
+        # is gitignored and machine-specific, so it must not decide test results.
+        config = load_yaml_config(Path("ai-mcp-server.yaml.example"))
         assert "chatgpt" in config["providers"]
         assert "gemini" in config["providers"]
         assert "claude" in config["providers"]

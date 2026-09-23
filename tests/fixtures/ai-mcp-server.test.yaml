@@ -1,0 +1,60 @@
+# Config owned by the test suite. tests/conftest.py points every test at this
+# file so results never depend on the live, machine-specific ai-mcp-server.yaml.
+#
+# Model names are deliberately fake: tests assert routing (provider + tier ->
+# the model configured for that tier), not which real model is current.
+defaults:
+  timeout_seconds: 180
+  max_retries: 3
+  retry_base_seconds: 30
+
+providers:
+  chatgpt:
+    type: openai
+    api_key_env_var: AI_MCP_TEST_OPENAI_API_KEY
+    models:
+      low:
+        model: test-openai-low
+        temperature: 0.2
+        max_tokens: 16000
+      middle:
+        model: test-openai-middle
+        temperature: 0.2
+        max_tokens: 32000
+      high:
+        model: test-openai-high
+        max_completion_tokens: 48000
+
+  gemini:
+    type: gemini
+    api_key_env_var: AI_MCP_TEST_GEMINI_API_KEY
+    models:
+      low:
+        model: test-gemini-low
+        temperature: 0.2
+        max_output_tokens: 16000
+      middle:
+        model: test-gemini-middle
+        temperature: 0.2
+        max_output_tokens: 32000
+      high:
+        model: test-gemini-high
+        temperature: 0.1
+        max_output_tokens: 48000
+
+  claude:
+    type: anthropic
+    api_key_env_var: AI_MCP_TEST_ANTHROPIC_API_KEY
+    models:
+      low:
+        model: test-claude-low
+        temperature: 0.2
+        max_tokens: 16000
+      middle:
+        model: test-claude-middle
+        temperature: 0.2
+        max_tokens: 32000
+      high:
+        model: test-claude-high
+        temperature: 0.1
+        max_tokens: 48000
