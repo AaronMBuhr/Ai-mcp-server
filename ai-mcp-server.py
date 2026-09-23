@@ -54,6 +54,7 @@ from prompt_contracts import (
     validate_replacements,
 )
 from content_validation import replacement_metadata
+from llm_providers import FINISH_MAX_TOKENS, FINISH_REFUSAL
 from response_contracts import (
     KNOWN_CONTRACTS,
     ResponseContractError,
@@ -641,6 +642,31 @@ def execute_prepared_query(
     elapsed_ms = int((time.time() - start_time) * 1000)
 
     response_text = result.text or ""
+    finish_reason = getattr(result, "finish_reason", None)
+    if finish_reason in (FINISH_MAX_TOKENS, FINISH_REFUSAL):
+        # A call that "succeeded" but was cut off at the output limit, or was
+        # declined, is not a response. Returning it as success let incomplete
+        # text reach callers as if it were whole. Not retryable: the same
+        # request hits the same limit.
+        truncated_output = finish_reason == FINISH_MAX_TOKENS
+        return error_result(
+            "output_truncated" if truncated_output else "refused",
+            (
+                f"Provider '{provider}' stopped at its output limit after "
+                f"{len(response_text)} characters; the response is incomplete. "
+                "Raise the tier's output-token limit or reduce the request."
+                if truncated_output else
+                f"Provider '{provider}' declined or filtered the response."
+            ),
+            request_id=request_id, provider_called=True, retryable=False,
+            extra={
+                "elapsed_ms": elapsed_ms,
+                "model_resolved": result.model or prepared["model_resolved"],
+                "finish_reason": finish_reason,
+                "usage": result.usage,
+                "partial_response_characters": len(response_text),
+            },
+        )
     if not response_text.strip():
         return error_result(
             "empty_response",
@@ -703,6 +729,7 @@ def execute_prepared_query(
         "response_text": inline_text,
         "warnings": list(prepared["warnings"]),
         "usage": result.usage,
+        "finish_reason": getattr(result, "finish_reason", None),
         "elapsed_ms": elapsed_ms,
         "system_prompt_template": system_prompt_template,
         "user_prompt_template": user_prompt_template,

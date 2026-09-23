@@ -139,7 +139,7 @@ class TestHardenedQueryAi:
     def test_uncontracted_templates_still_work(self):
         """The test-system/test-user pair has no contract and must keep working."""
         self.server._router.query = MagicMock(
-            return_value=LLMResult(text="OK", model="gpt-4.1-mini")
+            return_value=LLMResult(text="OK", model="gpt-5.4-mini")
         )
         r = self.query_ai(
             provider="chatgpt", intelligence="low",

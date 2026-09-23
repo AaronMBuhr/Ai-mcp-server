@@ -38,8 +38,8 @@ def config():
                 "type": "openai",
                 "api_key_env_var": "OPENAI_API_KEY",
                 "models": {
-                    "low": {"model": "gpt-4.1-mini", "temperature": 0.3, "max_tokens": 4000},
-                    "middle": {"model": "gpt-4.1", "max_tokens": 8000},
+                    "low": {"model": "gpt-5.4-mini", "temperature": 0.3, "max_tokens": 4000},
+                    "middle": {"model": "gpt-5.4", "max_tokens": 8000},
                     "high": {
                         "model": "gpt-5.5",
                         "temperature": 0.1,
@@ -84,13 +84,13 @@ class TestLLMRouterResolution:
     def test_chatgpt_low_resolves_model(self, router_with_fake):
         router, fake = router_with_fake
         result = router.query("chatgpt", "low", "sys", "usr")
-        assert result.model == "gpt-4.1-mini"
-        assert fake.calls[0]["options"].model == "gpt-4.1-mini"
+        assert result.model == "gpt-5.4-mini"
+        assert fake.calls[0]["options"].model == "gpt-5.4-mini"
 
     def test_chatgpt_middle_resolves_model(self, router_with_fake):
         router, fake = router_with_fake
         result = router.query("chatgpt", "middle", "sys", "usr")
-        assert result.model == "gpt-4.1"
+        assert result.model == "gpt-5.4"
 
     def test_chatgpt_high_resolves_model(self, router_with_fake):
         router, fake = router_with_fake

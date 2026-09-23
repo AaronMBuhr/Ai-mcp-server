@@ -21,11 +21,11 @@ providers:
     api_key_env_var: OPENAI_API_KEY
     models:
       low:
-        model: gpt-4.1-mini
+        model: gpt-5.4-mini
         temperature: 0.2
         max_tokens: 4000
       middle:
-        model: gpt-4.1
+        model: gpt-5.4
         max_tokens: 8000
       high:
         model: gpt-5.5
@@ -34,7 +34,7 @@ providers:
         config = load_yaml_config(config_file)
         assert "providers" in config
         assert "chatgpt" in config["providers"]
-        assert config["providers"]["chatgpt"]["models"]["low"]["model"] == "gpt-4.1-mini"
+        assert config["providers"]["chatgpt"]["models"]["low"]["model"] == "gpt-5.4-mini"
 
     def test_loads_real_config_file(self):
         config = load_yaml_config(Path("ai-mcp-server.yaml"))
@@ -89,11 +89,11 @@ providers:
     type: openai
     models:
       low:
-        model: gpt-4.1-mini
+        model: gpt-5.4-mini
 """)
         config = load_yaml_config(config_file)
         assert config.get("defaults") is None
-        assert config["providers"]["chatgpt"]["models"]["low"]["model"] == "gpt-4.1-mini"
+        assert config["providers"]["chatgpt"]["models"]["low"]["model"] == "gpt-5.4-mini"
 
     def test_does_not_require_api_keys(self, tmp_path):
         """API keys are resolved lazily at provider creation, not config load time."""
@@ -105,7 +105,7 @@ providers:
     api_key_env_var: TOTALLY_FAKE_KEY_12345
     models:
       low:
-        model: gpt-4.1-mini
+        model: gpt-5.4-mini
 """)
         config = load_yaml_config(config_file)
         assert config["providers"]["chatgpt"]["api_key_env_var"] == "TOTALLY_FAKE_KEY_12345"

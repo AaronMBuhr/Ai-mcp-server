@@ -31,7 +31,62 @@ class LLMResult:
     text: str
     model: str
     usage: Optional[Dict[str, Any]] = None
+    #: Normalized across providers: FINISH_STOP, FINISH_MAX_TOKENS,
+    #: FINISH_REFUSAL, or the provider's own value lower-cased when it is none
+    #: of those. None only when the provider reported nothing.
     finish_reason: Optional[str] = None
+
+
+FINISH_STOP = "stop"
+#: The response was cut off by the output limit (or the context window), so
+#: the text is incomplete even though the call succeeded.
+FINISH_MAX_TOKENS = "max_tokens"
+#: The provider declined or filtered the response.
+FINISH_REFUSAL = "refusal"
+
+_FINISH_MAP = {
+    # OpenAI
+    "stop": FINISH_STOP,
+    "length": FINISH_MAX_TOKENS,
+    "content_filter": FINISH_REFUSAL,
+    # Anthropic
+    "end_turn": FINISH_STOP,
+    "stop_sequence": FINISH_STOP,
+    "max_tokens": FINISH_MAX_TOKENS,
+    "model_context_window_exceeded": FINISH_MAX_TOKENS,
+    "refusal": FINISH_REFUSAL,
+    # Gemini (enum names; MAX_TOKENS and STOP match the entries above)
+    "safety": FINISH_REFUSAL,
+    "recitation": FINISH_REFUSAL,
+    "blocklist": FINISH_REFUSAL,
+    "prohibited_content": FINISH_REFUSAL,
+    "spii": FINISH_REFUSAL,
+}
+
+
+def normalize_finish_reason(raw: Any) -> Optional[str]:
+    """Map a provider's stop/finish reason onto the shared vocabulary."""
+    if raw is None:
+        return None
+    value = str(getattr(raw, "name", raw)).strip().lower()
+    if value.startswith("finishreason."):
+        value = value.split(".", 1)[1]
+    return _FINISH_MAP.get(value, value)
+
+
+def _usage_dict(usage: Any) -> Optional[Dict[str, Any]]:
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage
+    for method in ("model_dump", "to_dict"):
+        fn = getattr(usage, method, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:  # usage is diagnostic only; never fail a call on it
+                break
+    return {"repr": repr(usage)}
 
 
 class LLMProvider(ABC):
@@ -115,10 +170,14 @@ class ChatGPTProvider(LLMProvider):
         for attempt in range(options.max_retries):
             try:
                 result_text = ""
+                finish_reason = None
+                usage = None
                 request_kwargs: Dict[str, Any] = {
                     "model": options.model,
                     "messages": messages,
                     "stream": True,
+                    # Adds a final chunk carrying usage and no choices.
+                    "stream_options": {"include_usage": True},
                 }
                 request_kwargs.update(
                     {key: value for key, value in options.parameters.items() if value is not None}
@@ -126,10 +185,21 @@ class ChatGPTProvider(LLMProvider):
 
                 stream = self._client.chat.completions.create(**request_kwargs)
                 for chunk in stream:
-                    if chunk.choices[0].delta.content is not None:
-                        result_text += chunk.choices[0].delta.content
+                    if getattr(chunk, "usage", None) is not None:
+                        usage = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    if choice.delta is not None and choice.delta.content is not None:
+                        result_text += choice.delta.content
+                    if choice.finish_reason is not None:
+                        finish_reason = choice.finish_reason
 
-                return LLMResult(text=result_text, model=options.model)
+                return LLMResult(
+                    text=result_text, model=options.model,
+                    usage=_usage_dict(usage),
+                    finish_reason=normalize_finish_reason(finish_reason),
+                )
 
             except self._openai.AuthenticationError as e:
                 raise ValueError(
@@ -205,8 +275,13 @@ class ClaudeProvider(LLMProvider):
                 with self._client.messages.stream(**request_kwargs) as stream:
                     for text in stream.text_stream:
                         result_text += text
+                    final = stream.get_final_message()
 
-                return LLMResult(text=result_text, model=options.model)
+                return LLMResult(
+                    text=result_text, model=options.model,
+                    usage=_usage_dict(final.usage),
+                    finish_reason=normalize_finish_reason(final.stop_reason),
+                )
 
             except self._anthropic.RateLimitError:
                 if attempt < options.max_retries - 1:
@@ -262,7 +337,13 @@ class GeminiProvider(LLMProvider):
                     contents=user_prompt,
                     config=config,
                 )
-                return LLMResult(text=response.text, model=options.model)
+                candidates = getattr(response, "candidates", None) or []
+                raw_finish = candidates[0].finish_reason if candidates else None
+                return LLMResult(
+                    text=response.text or "", model=options.model,
+                    usage=_usage_dict(getattr(response, "usage_metadata", None)),
+                    finish_reason=normalize_finish_reason(raw_finish),
+                )
 
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
