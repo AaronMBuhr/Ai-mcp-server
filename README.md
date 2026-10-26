@@ -5,6 +5,7 @@ A **use-case-agnostic** [Model Context Protocol](https://modelcontextprotocol.io
 ## Features
 
 - **`query_ai`** — load Markdown prompt templates from `prompts/`, render placeholders, call a provider at a chosen intelligence tier
+- **`query_ai_batch`** — validate requests up front, then run provider calls concurrently with shared inputs
 - **`health_check`** — report server readiness and configured providers
 - Transports: **stdio** (MCP clients), **HTTP**, **HTTPS**
 
@@ -12,7 +13,7 @@ A **use-case-agnostic** [Model Context Protocol](https://modelcontextprotocol.io
 
 ### 1. Install dependencies
 
-Use the `mypython312` conda environment (or any Python 3.12+ env with the same packages):
+Use a Python 3.12+ environment with the following dependencies. Activate that environment before running the commands below, or invoke its Python executable by absolute path:
 
 ```text
 mcp
@@ -30,7 +31,7 @@ pytest
 
 ### 2. Configure providers
 
-Edit `ai-mcp-server.yaml` for model names and tiers. Set API keys via environment variables (see `.env.example`):
+Copy `ai-mcp-server.yaml.example` to `ai-mcp-server.yaml`, then edit the copy for model names and tiers. Set API keys via environment variables (see `.env.example`):
 
 ```text
 OPENAI_API_KEY=...
@@ -42,14 +43,16 @@ ANTHROPIC_API_KEY=...
 
 **Stdio (for Cursor / Claude Code):**
 
+Invoke Python directly for stdio transport. Do not wrap it in `conda run`: stdin must reach the MCP server. In an MCP client configuration, set the command to the environment's absolute Python executable path if the client does not inherit an activated environment.
+
 ```powershell
-conda run -n mypython312 --no-capture-output python -X utf8 ai-mcp-server.py --transport stdio
+python -X utf8 ai-mcp-server.py --transport stdio
 ```
 
 **HTTP:**
 
 ```powershell
-conda run -n mypython312 --no-capture-output python -X utf8 ai-mcp-server.py --transport http --port 8000
+python -X utf8 ai-mcp-server.py --transport http --port 8000
 ```
 
 Help page: `http://localhost:8000/help`
@@ -82,13 +85,13 @@ Template paths are relative to `prompts/` without the `.md` extension.
 **Unit tests (no API keys):**
 
 ```powershell
-conda run -n mypython312 --no-capture-output python -X utf8 -m pytest tests/ -v
+python -X utf8 -m pytest tests/ -v
 ```
 
 **Phase 6 smoke tests:**
 
 ```powershell
-conda run -n mypython312 --no-capture-output python -X utf8 scripts/smoke_test.py
+python -X utf8 scripts/smoke_test.py
 ```
 
 Live provider tests run only when the corresponding API key is set. Debug prompt files are written to `.debug/ai-mcp-server/` when `--save-debug-prompts` is enabled.
@@ -119,11 +122,12 @@ scripts/smoke_test.py Phase 6 acceptance smoke tests
 
 ## Specification
 
-The MCP server exposes two tools:
+The MCP server exposes three tools:
 
 | Tool | Purpose |
 |------|---------|
 | `query_ai` | Load `prompts/*.md` templates, render `{placeholders}`, call provider at `intelligence` tier |
+| `query_ai_batch` | Validate and execute multiple provider requests with shared replacement values |
 | `health_check` | Report readiness, configured providers, config and prompt paths |
 
 `query_ai` parameters:
